@@ -42,6 +42,9 @@
 	socket     = undefined :: undefined | inet:socket(),
 	transport  = undefined :: undefined | module(),
 	connection = keepalive :: keepalive | close,
+    %% Is this request via SPDY:
+    spdy       = false     :: boolean(), 
+    spdy_stream= undefined :: pid(), 
 
 	%% Request.
 	method     = 'GET'     :: http_method(),

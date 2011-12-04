@@ -1,3 +1,5 @@
+erl_crash.dump
+*.beam
 .cowboy_dialyzer.plt
 .eunit
 deps

@@ -398,10 +398,10 @@ reply(Status, Req=#http_req{resp_body=Body}) ->
 reply(Status, Headers, Req=#http_req{resp_body=Body}) ->
 	reply(Status, Headers, Body, Req).
 
-%% @doc Send a reply to the client.
+%% @doc Send a reply to the client (when client connected using http(s))
 -spec reply(http_status(), http_headers(), iodata(), #http_req{})
 	-> {ok, #http_req{}}.
-reply(Status, Headers, Body, Req=#http_req{socket=Socket,
+reply(Status, Headers, Body, Req=#http_req{socket=Socket, spdy=false,
 		transport=Transport, connection=Connection,
 		method=Method, resp_state=waiting, resp_headers=RespHeaders}) ->
 	RespConn = response_connection(Headers, Connection),
@@ -417,6 +417,27 @@ reply(Status, Headers, Body, Req=#http_req{socket=Socket,
 		_ -> Transport:send(Socket, [Head, Body])
 	end,
 	{ok, Req#http_req{connection=RespConn, resp_state=done,
+		resp_headers=[], resp_body= <<>>}};
+
+%% SPDY version
+reply(Status, Headers, Body, Req=#http_req{socket=_Socket, spdy=true,
+        transport=_Transport, connection=_Connection,
+		method=Method, resp_state=waiting, resp_headers=RespHeaders}) ->
+    io:format("reply, req: ~p\n",[Req]),
+	RespConn = keepalive, %% SPDY connections always persist
+    FinalRespHeaders = spdy_response_headers(Status, Headers, RespHeaders, [
+        {<<"url">>, Req#http_req.raw_path},
+		{<<"Content-Length">>,
+			list_to_binary(integer_to_list(iolist_size(Body)))},
+		{<<"Date">>, cowboy_clock:rfc1123()},
+		{<<"Server">>, <<"Cowboy">>}
+	]),
+    Pid = Req#http_req.spdy_stream,
+	case Method of
+        'HEAD' -> espdy_stream:send_response(Pid, FinalRespHeaders, <<>>);
+		_      -> espdy_stream:send_response(Pid, FinalRespHeaders, Body)
+	end,
+	{ok, Req#http_req{connection=RespConn, resp_state=done,
 		resp_headers=[], resp_body= <<>>}}.
 
 %% @equiv chunked_reply(Status, [], Req)
@@ -424,11 +445,12 @@ reply(Status, Headers, Body, Req=#http_req{socket=Socket,
 chunked_reply(Status, Req) ->
 	chunked_reply(Status, [], Req).
 
+%% TODO spdy chunked (just send a data frame per chunk)
 %% @doc Initiate the sending of a chunked reply to the client.
 %% @see cowboy_http_req:chunk/2
 -spec chunked_reply(http_status(), http_headers(), #http_req{})
 	-> {ok, #http_req{}}.
-chunked_reply(Status, Headers, Req=#http_req{socket=Socket, transport=Transport,
+chunked_reply(Status, Headers, Req=#http_req{socket=Socket, transport=Transport, spdy=false,
 		connection=Connection, resp_state=waiting, resp_headers=RespHeaders}) ->
 	RespConn = response_connection(Headers, Connection),
 	Head = response_head(Status, Headers, RespHeaders, [
@@ -451,10 +473,11 @@ chunk(Data, #http_req{socket=Socket, transport=Transport, resp_state=chunks}) ->
 	Transport:send(Socket, [integer_to_list(iolist_size(Data), 16),
 		<<"\r\n">>, Data, <<"\r\n">>]).
 
+%% TODO figure out how to marshal websockets over SPDY:
 %% @doc Send an upgrade reply.
 -spec upgrade_reply(http_status(), http_headers(), #http_req{})
 	-> {ok, #http_req{}}.
-upgrade_reply(Status, Headers, Req=#http_req{socket=Socket, transport=Transport,
+upgrade_reply(Status, Headers, Req=#http_req{socket=Socket, transport=Transport, spdy=false,
 		resp_state=waiting, resp_headers=RespHeaders}) ->
 	Head = response_head(Status, Headers, RespHeaders, [
 		{<<"Connection">>, <<"Upgrade">>}
@@ -519,6 +542,16 @@ response_head(Status, Headers, RespHeaders, DefaultHeaders) ->
 	Headers4 = [[Key, <<": ">>, Value, <<"\r\n">>]
 		|| {Key, Value} <- Headers3],
 	[StatusLine, Headers4, <<"\r\n">>].
+
+spdy_response_headers(Status, Headers, RespHeaders, DefaultHeaders) ->
+	H0 = [{header_to_binary(Key), Value} || {Key, Value} <- Headers],
+	H  = merge_headers( merge_headers(H0, RespHeaders), DefaultHeaders),
+    [   {<<"status">>, status(Status)},
+        {<<"version">>, <<"HTTP/1.1">>}
+        |
+        H
+    ].
+
 
 -spec merge_headers(http_headers(), http_headers()) -> http_headers().
 merge_headers(Headers, []) ->
